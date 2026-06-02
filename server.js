@@ -1,67 +1,47 @@
 const express = require('express');
-const admin = require('firebase-admin');
+const webpush = require('web-push');
 const cors = require('cors');
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// Firebase init
-const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+const VAPID_PUBLIC_KEY = 'BGOAHouwntDKP1efv8zsURVxpokIW2xgwEO7QKvs_SB8MVC6el8q7kssMSMuyzeamU9wVy2KZfO-L4vo6aF_36k';
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || 'Y7mlTq-9q7ufEEkTPn_dWssItiRLov_iOZC77woiIOI';
 
-// Armazena tokens FCM por userId
-const tokens = new Map();
+webpush.setVapidDetails(
+  'mailto:marcos.fernandes16@hotmail.com',
+  VAPID_PUBLIC_KEY,
+  VAPID_PRIVATE_KEY
+);
 
-// Registra token FCM do usuário
+const subscriptions = new Map();
+
 app.post('/register', (req, res) => {
-  const { userId, fcmToken } = req.body;
-  if (!userId || !fcmToken) return res.status(400).json({ error: 'userId e fcmToken obrigatórios' });
-  tokens.set(userId, fcmToken);
-  console.log("Token registrado para:", userId);
+  const { userId, subscription } = req.body;
+  if (!userId || !subscription) return res.status(400).json({ error: 'Dados inválidos' });
+  subscriptions.set(userId, subscription);
+  console.log("Registrado:", userId, "Total:", subscriptions.size);
   res.json({ success: true });
 });
 
-// Envia notificação push via FCM
 app.post('/notify', async (req, res) => {
-  const { userId, fcmToken, title, body } = req.body;
-  const token = fcmToken || tokens.get(userId);
-  if (!token) return res.status(404).json({ error: 'Token não encontrado' });
-
+  const { userId, title, body } = req.body;
+  const subscription = subscriptions.get(userId);
+  if (!subscription) return res.status(404).json({ error: 'Não registrado' });
   try {
-    await admin.messaging().send({
-      token,
-      notification: { title, body },
-      webpush: {
-        notification: {
-          title, body,
-          icon: '/icon-192.png',
-          requireInteraction: true,
-          vibrate: [300, 100, 300],
-        },
-        fcmOptions: { link: '/' }
-      },
-      android: {
-        priority: 'high',
-        notification: {
-          sound: 'default',
-          priority: 'high',
-          channelId: 'remember_channel',
-        }
-      }
-    });
-    console.log("Notificação enviada:", title);
+    await webpush.sendNotification(subscription, JSON.stringify({ title, body }));
+    console.log("Push enviado:", title);
     res.json({ success: true });
   } catch (e) {
     console.error("Erro:", e.message);
+    if (e.statusCode === 410) subscriptions.delete(userId);
     res.status(500).json({ error: e.message });
   }
 });
 
-app.get('/', (req, res) => res.json({ 
-  status: 'Remember Server rodando!', 
-  users: tokens.size 
-}));
+app.get('/vapid-public-key', (req, res) => res.json({ key: VAPID_PUBLIC_KEY }));
+app.get('/', (req, res) => res.json({ status: 'Remember Server ok!', users: subscriptions.size }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
+app.listen(PORT, () => console.log(`Rodando na porta ${PORT}`));
