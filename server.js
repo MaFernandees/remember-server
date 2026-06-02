@@ -1,6 +1,7 @@
 const express = require('express');
 const webpush = require('web-push');
 const cors = require('cors');
+const cron = require('node-cron');
 
 const app = express();
 app.use(cors());
@@ -15,7 +16,16 @@ webpush.setVapidDetails(
   VAPID_PRIVATE_KEY
 );
 
+// userId -> PushSubscription JSON
 const subscriptions = new Map();
+
+// `${userId}__${reminderId}` -> { userId, notifyAt, title, body, fired }
+const scheduledReminders = new Map();
+
+// ── ENDPOINTS ────────────────────────────────────────────────
+app.get('/', (req, res) => res.json({ status: 'Remember Server ok!', users: subscriptions.size, reminders: scheduledReminders.size }));
+
+app.get('/vapid-public-key', (req, res) => res.json({ key: VAPID_PUBLIC_KEY }));
 
 app.post('/register', (req, res) => {
   const { userId, subscription } = req.body;
@@ -40,8 +50,60 @@ app.post('/notify', async (req, res) => {
   }
 });
 
-app.get('/vapid-public-key', (req, res) => res.json({ key: VAPID_PUBLIC_KEY }));
-app.get('/', (req, res) => res.json({ status: 'Remember Server ok!', users: subscriptions.size }));
+// Agenda lembrete no servidor para disparo mesmo com app fechado
+app.post('/schedule-reminder', (req, res) => {
+  const { userId, reminderId, notifyAt, title, body } = req.body;
+  if (!userId || !reminderId || !notifyAt) {
+    return res.status(400).json({ error: 'userId, reminderId e notifyAt são obrigatórios' });
+  }
+  const key = `${userId}__${reminderId}`;
+  scheduledReminders.set(key, { userId, notifyAt, title, body, fired: false });
+  console.log(`[schedule] key=${key} notifyAt=${notifyAt} total=${scheduledReminders.size}`);
+  res.json({ success: true });
+});
+
+// Remove lembrete agendado quando usuário deleta
+app.delete('/schedule-reminder/:userId/:reminderId', (req, res) => {
+  const key = `${req.params.userId}__${req.params.reminderId}`;
+  scheduledReminders.delete(key);
+  console.log(`[unschedule] key=${key}`);
+  res.json({ success: true });
+});
+
+// ── CRON: verifica e dispara lembretes a cada minuto ─────────
+cron.schedule('* * * * *', async () => {
+  const now = Date.now();
+  for (const [key, reminder] of scheduledReminders.entries()) {
+    if (reminder.fired) continue;
+    if (new Date(reminder.notifyAt).getTime() > now) continue;
+
+    reminder.fired = true;
+    const sub = subscriptions.get(reminder.userId);
+    if (!sub) {
+      console.log(`[cron] sem subscription para userId=${reminder.userId}`);
+      continue;
+    }
+
+    try {
+      await webpush.sendNotification(sub, JSON.stringify({
+        title: reminder.title,
+        body: reminder.body,
+      }));
+      console.log(`[cron] push disparado: key=${key}`);
+    } catch (e) {
+      console.error(`[cron] erro push key=${key}:`, e.message);
+      if (e.statusCode === 410) subscriptions.delete(reminder.userId);
+    }
+  }
+
+  // Limpa disparados há mais de 1h para não acumular memória
+  const oneHourAgo = Date.now() - 60 * 60 * 1000;
+  for (const [key, reminder] of scheduledReminders.entries()) {
+    if (reminder.fired && new Date(reminder.notifyAt).getTime() < oneHourAgo) {
+      scheduledReminders.delete(key);
+    }
+  }
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Rodando na porta ${PORT}`));
