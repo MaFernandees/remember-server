@@ -10,36 +10,31 @@ app.use(express.json({ limit: '10mb' }));
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 
-// Armazena subscriptions em memória
-const subscriptions = new Map();
+// Armazena tokens FCM por userId
+const tokens = new Map();
 
-// Registra subscription do usuário
+// Registra token FCM do usuário
 app.post('/register', (req, res) => {
-  const { userId, subscription } = req.body;
-  if (!userId || !subscription) return res.status(400).json({ error: 'Dados inválidos' });
-  subscriptions.set(userId, subscription);
-  console.log("Usuário registrado:", userId);
+  const { userId, fcmToken } = req.body;
+  if (!userId || !fcmToken) return res.status(400).json({ error: 'userId e fcmToken obrigatórios' });
+  tokens.set(userId, fcmToken);
+  console.log("Token registrado para:", userId);
   res.json({ success: true });
 });
 
 // Envia notificação push via FCM
 app.post('/notify', async (req, res) => {
-  const { userId, title, body } = req.body;
-  const subscription = subscriptions.get(userId);
-  if (!subscription) return res.status(404).json({ error: 'Usuário não registrado' });
+  const { userId, fcmToken, title, body } = req.body;
+  const token = fcmToken || tokens.get(userId);
+  if (!token) return res.status(404).json({ error: 'Token não encontrado' });
 
   try {
-    // Usa FCM via endpoint da subscription
-    const endpoint = subscription.endpoint;
-    const fcmToken = endpoint.split('/').pop();
-
     await admin.messaging().send({
-      token: fcmToken,
+      token,
       notification: { title, body },
       webpush: {
         notification: {
-          title,
-          body,
+          title, body,
           icon: '/icon-192.png',
           requireInteraction: true,
           vibrate: [300, 100, 300],
@@ -52,20 +47,21 @@ app.post('/notify', async (req, res) => {
           sound: 'default',
           priority: 'high',
           channelId: 'remember_channel',
-          notificationCount: 1,
         }
       }
     });
-
-    console.log("Notificação enviada para:", userId);
+    console.log("Notificação enviada:", title);
     res.json({ success: true });
   } catch (e) {
-    console.error("Erro ao enviar:", e.message);
+    console.error("Erro:", e.message);
     res.status(500).json({ error: e.message });
   }
 });
 
-app.get('/', (req, res) => res.json({ status: 'Remember Server rodando!', users: subscriptions.size }));
+app.get('/', (req, res) => res.json({ 
+  status: 'Remember Server rodando!', 
+  users: tokens.size 
+}));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
