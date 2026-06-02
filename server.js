@@ -4,48 +4,68 @@ const cors = require('cors');
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
 // Firebase init
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 
-const db = new Map(); // armazena tokens e lembretes em memória
+// Armazena subscriptions em memória
+const subscriptions = new Map();
 
-// Registra token do usuário
+// Registra subscription do usuário
 app.post('/register', (req, res) => {
-  const { token, userId } = req.body;
-  if (!token || !userId) return res.status(400).json({ error: 'Token e userId obrigatórios' });
-  db.set(userId, { token, reminders: [] });
+  const { userId, subscription } = req.body;
+  if (!userId || !subscription) return res.status(400).json({ error: 'Dados inválidos' });
+  subscriptions.set(userId, subscription);
+  console.log("Usuário registrado:", userId);
   res.json({ success: true });
 });
 
-// Salva lembrete
-app.post('/reminder', (req, res) => {
-  const { userId, reminder } = req.body;
-  if (!userId || !reminder) return res.status(400).json({ error: 'Dados inválidos' });
-  const user = db.get(userId) || { token: null, reminders: [] };
-  user.reminders.push(reminder);
-  db.set(userId, user);
-  res.json({ success: true });
-});
-
-// Dispara notificação
+// Envia notificação push via FCM
 app.post('/notify', async (req, res) => {
-  const { token, title, body } = req.body;
+  const { userId, title, body } = req.body;
+  const subscription = subscriptions.get(userId);
+  if (!subscription) return res.status(404).json({ error: 'Usuário não registrado' });
+
   try {
+    // Usa FCM via endpoint da subscription
+    const endpoint = subscription.endpoint;
+    const fcmToken = endpoint.split('/').pop();
+
     await admin.messaging().send({
-      token,
+      token: fcmToken,
       notification: { title, body },
-      android: { priority: 'high', notification: { sound: 'default', priority: 'high', channelId: 'remember' } },
+      webpush: {
+        notification: {
+          title,
+          body,
+          icon: '/icon-192.png',
+          requireInteraction: true,
+          vibrate: [300, 100, 300],
+        },
+        fcmOptions: { link: '/' }
+      },
+      android: {
+        priority: 'high',
+        notification: {
+          sound: 'default',
+          priority: 'high',
+          channelId: 'remember_channel',
+          notificationCount: 1,
+        }
+      }
     });
+
+    console.log("Notificação enviada para:", userId);
     res.json({ success: true });
   } catch (e) {
+    console.error("Erro ao enviar:", e.message);
     res.status(500).json({ error: e.message });
   }
 });
 
-app.get('/', (req, res) => res.json({ status: 'Remember Server rodando!' }));
+app.get('/', (req, res) => res.json({ status: 'Remember Server rodando!', users: subscriptions.size }));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
