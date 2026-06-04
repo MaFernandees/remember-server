@@ -157,7 +157,13 @@ app.post('/parse-ai', async (req, res) => {
   if (!text) return res.status(400).json({ error: 'text é obrigatório' });
 
   const OPENROUTER_KEY   = process.env.OPENROUTER_API_KEY;
-  const OPENROUTER_MODEL = 'meta-llama/llama-3.3-70b-instruct:free';
+  // Tenta modelos em ordem até um funcionar (rate limit / disponibilidade)
+  const MODELS = [
+    'meta-llama/llama-3.3-70b-instruct:free',
+    'mistralai/mistral-7b-instruct:free',
+    'google/gemma-3-12b-it:free',
+    'qwen/qwen3-8b:free'
+  ];
 
   if (!OPENROUTER_KEY) return res.status(503).json({ error: 'OPENROUTER_API_KEY não configurada no servidor' });
 
@@ -178,36 +184,46 @@ Rules:
 
 Example output: {"titulo":"Consulta médica","dataHora":"2026-06-05T15:30:00","avisoMinutos":60}`;
 
-  try {
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${OPENROUTER_KEY}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://remember-app-remember-projects.vercel.app',
-        'X-Title': 'Remember PWA'
-      },
-      body: JSON.stringify({
-        model: OPENROUTER_MODEL,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user',   content: `Current date/time: ${nowHuman || nowISO}\nReminder text: "${text}"` }
-        ],
-        temperature: 0.1,
-        max_tokens: 200
-      })
-    });
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user',   content: `Current date/time: ${nowHuman || nowISO}\nReminder text: "${text}"` }
+  ];
 
-    if (!response.ok) throw new Error(`OpenRouter error ${response.status}`);
-    const data = await response.json();
-    const raw = data.choices?.[0]?.message?.content?.trim() || '';
-    const jsonStr = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-    const parsed = JSON.parse(jsonStr);
-    res.json(parsed);
-  } catch (err) {
-    console.error('[parse-ai] erro:', err.message);
-    res.status(500).json({ error: err.message });
+  let lastError = '';
+  for (const model of MODELS) {
+    try {
+      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${OPENROUTER_KEY}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://remember-app-remember-projects.vercel.app',
+          'X-Title': 'Remember PWA'
+        },
+        body: JSON.stringify({ model, messages, temperature: 0.1, max_tokens: 200 })
+      });
+
+      if (response.status === 429 || response.status === 503) {
+        lastError = `model ${model} returned ${response.status}`;
+        console.warn(`[parse-ai] ${lastError}, tentando próximo modelo...`);
+        continue;
+      }
+      if (!response.ok) throw new Error(`OpenRouter error ${response.status}`);
+
+      const data = await response.json();
+      const raw = data.choices?.[0]?.message?.content?.trim() || '';
+      const jsonStr = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+      const parsed = JSON.parse(jsonStr);
+      console.log(`[parse-ai] ok com modelo ${model}:`, parsed.titulo);
+      return res.json(parsed);
+    } catch (err) {
+      lastError = err.message;
+      console.warn(`[parse-ai] erro no modelo ${model}:`, err.message);
+    }
   }
+
+  console.error('[parse-ai] todos os modelos falharam:', lastError);
+  res.status(500).json({ error: 'Todos os modelos AI indisponíveis. Tente novamente em instantes.' });
 });
 
 // ── CRON: dispara lembretes a cada minuto ─────────────────────
