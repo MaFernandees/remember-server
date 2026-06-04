@@ -151,6 +151,65 @@ app.delete('/schedule-reminder/:userId/:reminderId', (req, res) => {
   res.json({ success: true });
 });
 
+// ── PARSE VIA OPENROUTER AI ──────────────────────────────────
+app.post('/parse-ai', async (req, res) => {
+  const { text, nowISO, nowHuman } = req.body;
+  if (!text) return res.status(400).json({ error: 'text é obrigatório' });
+
+  const OPENROUTER_KEY   = process.env.OPENROUTER_API_KEY;
+  const OPENROUTER_MODEL = 'meta-llama/llama-3.3-70b-instruct:free';
+
+  if (!OPENROUTER_KEY) return res.status(503).json({ error: 'OPENROUTER_API_KEY não configurada no servidor' });
+
+  const systemPrompt = `You are a Brazilian Portuguese reminder parser. The user will send a reminder text in informal Brazilian Portuguese. Extract:
+1. "titulo": clean task title (no date/time/notification info — just what the task is)
+2. "dataHora": ISO 8601 datetime string (local Brazil time, UTC-3) for when the reminder event happens
+3. "avisoMinutos": minutes before the event to send the advance notification (null if none requested)
+
+Rules:
+- "daqui X horas" = X hours from NOW (not from midnight)
+- "amanhã" = tomorrow
+- "sexta-feira", "sábado" etc = the next upcoming occurrence of that weekday
+- "da tarde" = PM (add 12 if hour < 12), "da manhã" = AM, "da noite" = PM
+- "e meia" = 30 minutes (e.g. "três e meia da tarde" = 15:30)
+- "me lembra às X" or "me avisa às X" = set avisoMinutos so notification fires at that time
+- If no date mentioned, assume today; if time already passed today, assume tomorrow
+- Return ONLY valid JSON, no explanation, no markdown.
+
+Example output: {"titulo":"Consulta médica","dataHora":"2026-06-05T15:30:00","avisoMinutos":60}`;
+
+  try {
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OPENROUTER_KEY}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://remember-app-remember-projects.vercel.app',
+        'X-Title': 'Remember PWA'
+      },
+      body: JSON.stringify({
+        model: OPENROUTER_MODEL,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user',   content: `Current date/time: ${nowHuman || nowISO}\nReminder text: "${text}"` }
+        ],
+        temperature: 0.1,
+        max_tokens: 200
+      })
+    });
+
+    if (!response.ok) throw new Error(`OpenRouter error ${response.status}`);
+    const data = await response.json();
+    const raw = data.choices?.[0]?.message?.content?.trim() || '';
+    const jsonStr = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+    const parsed = JSON.parse(jsonStr);
+    res.json(parsed);
+  } catch (err) {
+    console.error('[parse-ai] erro:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── CRON: dispara lembretes a cada minuto ─────────────────────
 cron.schedule('* * * * *', async () => {
   const now = Date.now();
