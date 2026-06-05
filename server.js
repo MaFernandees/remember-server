@@ -186,7 +186,11 @@ Example output: {"titulo":"Consulta médica","dataHora":"2026-06-05T15:30:00","a
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.1, maxOutputTokens: 300 }
+          generationConfig: {
+            temperature: 0.1,
+            maxOutputTokens: 500,
+            thinkingConfig: { thinkingBudget: 0 }  // desativa o modo "thinking"
+          }
         })
       }
     );
@@ -197,9 +201,15 @@ Example output: {"titulo":"Consulta médica","dataHora":"2026-06-05T15:30:00","a
     }
 
     const data = await response.json();
-    const raw = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
-    const jsonStr = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-    const parsed = JSON.parse(jsonStr);
+    // Concatena todas as parts (thinking pode gerar múltiplas)
+    const raw = (data.candidates?.[0]?.content?.parts || [])
+      .map(p => p.text || '').join('').trim();
+    console.log('[parse-ai] Gemini raw:', raw.substring(0, 200));
+
+    // Extrai JSON da resposta (remove markdown ```json ... ```)
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error('Gemini não retornou JSON válido: ' + raw.substring(0, 100));
+    const parsed = JSON.parse(jsonMatch[0]);
     console.log('[parse-ai] Gemini ok:', parsed.titulo);
     res.json(parsed);
   } catch (err) {
