@@ -151,21 +151,13 @@ app.delete('/schedule-reminder/:userId/:reminderId', (req, res) => {
   res.json({ success: true });
 });
 
-// ── PARSE VIA OPENROUTER AI ──────────────────────────────────
+// ── PARSE VIA GOOGLE GEMINI AI ───────────────────────────────
 app.post('/parse-ai', async (req, res) => {
   const { text, nowISO, nowHuman } = req.body;
   if (!text) return res.status(400).json({ error: 'text é obrigatório' });
 
-  const OPENROUTER_KEY   = process.env.OPENROUTER_API_KEY;
-  // Tenta modelos em ordem até um funcionar (rate limit / disponibilidade)
-  const MODELS = [
-    'meta-llama/llama-3.3-70b-instruct:free',
-    'mistralai/mistral-7b-instruct:free',
-    'google/gemma-3-12b-it:free',
-    'qwen/qwen3-8b:free'
-  ];
-
-  if (!OPENROUTER_KEY) return res.status(503).json({ error: 'OPENROUTER_API_KEY não configurada no servidor' });
+  const GEMINI_KEY = process.env.GEMINI_API_KEY;
+  if (!GEMINI_KEY) return res.status(503).json({ error: 'GEMINI_API_KEY não configurada no servidor' });
 
   const systemPrompt = `You are a Brazilian Portuguese reminder parser. The user will send a reminder text in informal Brazilian Portuguese. Extract:
 1. "titulo": clean task title (no date/time/notification info — just what the task is)
@@ -184,46 +176,36 @@ Rules:
 
 Example output: {"titulo":"Consulta médica","dataHora":"2026-06-05T15:30:00","avisoMinutos":60}`;
 
-  const messages = [
-    { role: 'system', content: systemPrompt },
-    { role: 'user',   content: `Current date/time: ${nowHuman || nowISO}\nReminder text: "${text}"` }
-  ];
+  const prompt = `${systemPrompt}\n\nCurrent date/time: ${nowHuman || nowISO}\nReminder text: "${text}"`;
 
-  let lastError = '';
-  for (const model of MODELS) {
-    try {
-      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
+      {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${OPENROUTER_KEY}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': 'https://remember-app-remember-projects.vercel.app',
-          'X-Title': 'Remember PWA'
-        },
-        body: JSON.stringify({ model, messages, temperature: 0.1, max_tokens: 200 })
-      });
-
-      if (response.status === 429 || response.status === 503) {
-        lastError = `model ${model} returned ${response.status}`;
-        console.warn(`[parse-ai] ${lastError}, tentando próximo modelo...`);
-        continue;
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.1, maxOutputTokens: 300 }
+        })
       }
-      if (!response.ok) throw new Error(`OpenRouter error ${response.status}`);
+    );
 
-      const data = await response.json();
-      const raw = data.choices?.[0]?.message?.content?.trim() || '';
-      const jsonStr = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-      const parsed = JSON.parse(jsonStr);
-      console.log(`[parse-ai] ok com modelo ${model}:`, parsed.titulo);
-      return res.json(parsed);
-    } catch (err) {
-      lastError = err.message;
-      console.warn(`[parse-ai] erro no modelo ${model}:`, err.message);
+    if (!response.ok) {
+      const errBody = await response.text();
+      throw new Error(`Gemini error ${response.status}: ${errBody}`);
     }
-  }
 
-  console.error('[parse-ai] todos os modelos falharam:', lastError);
-  res.status(500).json({ error: 'Todos os modelos AI indisponíveis. Tente novamente em instantes.' });
+    const data = await response.json();
+    const raw = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+    const jsonStr = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+    const parsed = JSON.parse(jsonStr);
+    console.log('[parse-ai] Gemini ok:', parsed.titulo);
+    res.json(parsed);
+  } catch (err) {
+    console.error('[parse-ai] Gemini erro:', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ── CRON: dispara lembretes a cada minuto ─────────────────────
